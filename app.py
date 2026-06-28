@@ -16,19 +16,25 @@ IMG_SIZE = 128
 PATCH_SIZE = 64
 NUM_PATCHES = 10
 
-# --- Decision sensitivity ---------------------------------------------------
+# --- Decision bands ---------------------------------------------------------
 # The patch-voting CNN outputs ai_conf in [0, 1] (mean AI-class probability
-# across patches). The natural boundary is 0.50 (equivalent to argmax over the
-# 2 classes): ai_conf > 0.50 -> "AI-Generated", else "Human-Made".
-#
-# REAL_SENSITIVITY scales how much AI-evidence is required before flagging an
-# image. 1.0 = original behavior. Lowering it makes the detector LESS sensitive
-# to real images (it needs less evidence to call something AI), so it predicts
-# "AI-Generated" more often.
-#   REAL_SENSITIVITY = 1.0  ->  AI when ai_conf > 0.50  (original)
-#   REAL_SENSITIVITY = 0.5  ->  AI when ai_conf > 0.25  (50% less sensitive)
-REAL_SENSITIVITY = 0.5
-AI_DECISION_THRESHOLD = 0.5 * REAL_SENSITIVITY  # 0.25 when REAL_SENSITIVITY = 0.5
+# across patches). Instead of a single boundary we lean toward AI with a
+# three-way verdict, so borderline images are flagged "Uncertain" rather than
+# waved through as human:
+#   ai_conf >= 0.35          -> "AI-Generated"
+#   0.20 <= ai_conf < 0.35   -> "Uncertain"
+#   ai_conf < 0.20           -> "Human-Made"
+AI_THRESHOLD = 0.35      # at/above this -> AI
+UNSURE_THRESHOLD = 0.20  # at/above this (but below AI_THRESHOLD) -> Uncertain
+
+
+def classify(ai_conf: float) -> str:
+    """Map an AI-class confidence to a verdict: 'ai' | 'unsure' | 'human'."""
+    if ai_conf >= AI_THRESHOLD:
+        return "ai"
+    if ai_conf >= UNSURE_THRESHOLD:
+        return "unsure"
+    return "human"
 
 
 class PatchCraftDetector(nn.Module):
@@ -71,8 +77,10 @@ def load_model():
     return model
 
 
-def predict(model: nn.Module, image_bytes: bytes) -> tuple[bool, float]:
-    """Returns (is_ai, ai_confidence_0_to_1) using patch voting."""
+def predict(model: nn.Module, image_bytes: bytes) -> tuple[str, float]:
+    """Returns (verdict, ai_confidence_0_to_1) using patch voting.
+
+    verdict is 'ai' | 'unsure' | 'human' (see classify())."""
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
     arr = np.asarray(img, dtype=np.float32) / 255.0          # (H, W, 3)
     chw = np.transpose(arr, (2, 0, 1))                       # (3, H, W)
@@ -90,7 +98,7 @@ def predict(model: nn.Module, image_bytes: bytes) -> tuple[bool, float]:
     with torch.no_grad():
         probs = torch.softmax(model(batch), dim=1)[:, 1].cpu().numpy()
     ai_conf = float(probs.mean())
-    return ai_conf > AI_DECISION_THRESHOLD, ai_conf
+    return classify(ai_conf), ai_conf
 
 
 # ============================================================
@@ -110,8 +118,9 @@ st.markdown(
     .main { padding: 2rem; }
     .title-container { text-align: center; margin-bottom: 2rem; }
     .result-container { padding: 1.5rem; border-radius: 10px; margin-top: 1.5rem; font-size: 1.1rem; }
-    .ai-result    { background-color: #ffebee; border-left: 6px solid #f44336; }
-    .human-result { background-color: #e8f5e9; border-left: 6px solid #4caf50; }
+    .ai-result     { background-color: #ffebee; border-left: 6px solid #f44336; }
+    .unsure-result { background-color: #fff8e1; border-left: 6px solid #f59e0b; }
+    .human-result  { background-color: #e8f5e9; border-left: 6px solid #4caf50; }
     .confidence-label { font-weight: bold; margin-top: 1rem; margin-bottom: 0.5rem; }
 
     .leon-breadcrumb {
@@ -165,6 +174,7 @@ with st.sidebar:
 - Supports JPG, PNG, BMP, GIF, WebP
 - Resizes input to 128×128, samples 10 random 64×64 patches
 - Reports the averaged AI-class probability across patches
+- Verdict: AI if ≥ 35%, Uncertain if 20% to 35%, Human if < 20%
 """
     )
     st.markdown("---")
@@ -203,12 +213,14 @@ else:
             col1.image(image_bytes, caption=uploaded_file.name, use_column_width=True)
 
             with st.spinner(f"🔄 Analyzing {uploaded_file.name}..."):
-                is_ai, ai_conf = predict(model, image_bytes)
+                verdict, ai_conf = predict(model, image_bytes)
             human_conf = 1 - ai_conf
 
-            verdict_color = "#f44336" if is_ai else "#4caf50"
-            verdict_label = "AI-Generated" if is_ai else "Human-Made"
-            verdict_class = "ai-result" if is_ai else "human-result"
+            verdict_color, verdict_label, verdict_class = {
+                "ai":     ("#f44336", "AI-Generated", "ai-result"),
+                "unsure": ("#f59e0b", "Uncertain",    "unsure-result"),
+                "human":  ("#4caf50", "Human-Made",   "human-result"),
+            }[verdict]
 
             col2.markdown(
                 f"""
