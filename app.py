@@ -16,6 +16,20 @@ IMG_SIZE = 128
 PATCH_SIZE = 64
 NUM_PATCHES = 10
 
+# --- Decision sensitivity ---------------------------------------------------
+# The patch-voting CNN outputs ai_conf in [0, 1] (mean AI-class probability
+# across patches). The natural boundary is 0.50 (equivalent to argmax over the
+# 2 classes): ai_conf > 0.50 -> "AI-Generated", else "Human-Made".
+#
+# REAL_SENSITIVITY scales how much AI-evidence is required before flagging an
+# image. 1.0 = original behavior. Lowering it makes the detector LESS sensitive
+# to real images (it needs less evidence to call something AI), so it predicts
+# "AI-Generated" more often.
+#   REAL_SENSITIVITY = 1.0  ->  AI when ai_conf > 0.50  (original)
+#   REAL_SENSITIVITY = 0.5  ->  AI when ai_conf > 0.25  (50% less sensitive)
+REAL_SENSITIVITY = 0.5
+AI_DECISION_THRESHOLD = 0.5 * REAL_SENSITIVITY  # 0.25 when REAL_SENSITIVITY = 0.5
+
 
 class PatchCraftDetector(nn.Module):
     def __init__(self, patch_size: int = PATCH_SIZE):
@@ -76,7 +90,7 @@ def predict(model: nn.Module, image_bytes: bytes) -> tuple[bool, float]:
     with torch.no_grad():
         probs = torch.softmax(model(batch), dim=1)[:, 1].cpu().numpy()
     ai_conf = float(probs.mean())
-    return ai_conf > 0.5, ai_conf
+    return ai_conf > AI_DECISION_THRESHOLD, ai_conf
 
 
 # ============================================================
